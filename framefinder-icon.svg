@@ -1,0 +1,15 @@
+<svg width="1024" height="1024" aria-labelledby="title description" role="img" version="1.1" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+ <title id="title">Frame Finder discovery icon</title>
+ <desc id="description">A sparkle centered inside four rounded finder corners on a blue tile.</desc>
+ <rect x="32" y="32" width="960" height="960" rx="224" fill="#6A94FF"/>
+ <g stroke="#fff">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="76">
+   <path d="m390 260h-76c-30 0-54 24-54 54v76"/>
+   <path d="m634 260h76c30 0 54 24 54 54v76"/>
+   <path d="m390 764h-76c-30 0-54-24-54-54v-76"/>
+  </g>
+  <path d="m591.07 584.44 127.28 113.36" fill="none" stroke-linecap="round" stroke-width="56"/>
+  <path d="m512 342c16 99 71 154 170 170-99 16-154 71-170 170-16-99-71-154-170-170 99-16 154-71 170-170z" fill="#fff" fill-opacity=".30501" stroke-linejoin="round" stroke-width="40"/>
+ </g>
+ <path d="m670.7 396.14a28.859 28.555 0 0 1-28.856 28.555 28.859 28.555 0 0 1-28.861-28.549 28.859 28.555 0 0 1 28.85-28.56 28.859 28.555 0 0 1 28.867 28.544" fill="#fff" fill-rule="evenodd" style="paint-order:markers stroke fill"/>
+</svg>

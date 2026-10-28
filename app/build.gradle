@@ -1,0 +1,208 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "org.jetbrains.kotlin.plugin.compose"
+    id "org.jetbrains.kotlin.kapt"
+}
+
+// Keep everyday emulator builds small and fast. Override these properties when
+// producing APKs for physical devices or a multi-ABI release.
+def frameFinderAbis = providers.gradleProperty("framefinderAbis")
+        .getOrElse("x86_64")
+        .split(",")
+        .collect { it.trim() }
+        .findAll { !it.isEmpty() }
+def frameFinderUniversalApk = providers.gradleProperty("framefinderUniversalApk")
+        .map { it.toBoolean() }
+        .getOrElse(false)
+def frameFinderCompressModelsOverride = providers.gradleProperty("framefinderCompressModels")
+        .map { it.toBoolean() }
+
+// Release credentials live outside Git and are supplied by the developer or CI.
+// Keeping the four values together prevents accidentally building with a partial
+// signing configuration.
+def releaseSigning = [
+        keystore    : System.getenv("FRAMEFINDER_KEYSTORE"),
+        storePassword: System.getenv("FRAMEFINDER_STORE_PASSWORD"),
+        keyAlias    : System.getenv("FRAMEFINDER_KEY_ALIAS"),
+        keyPassword : System.getenv("FRAMEFINDER_KEY_PASSWORD")
+]
+def suppliedReleaseSigningValues = releaseSigning.values().findAll {
+    it != null && !it.trim().isEmpty()
+}
+def hasReleaseSigning = suppliedReleaseSigningValues.size() == releaseSigning.size()
+def releaseKeystoreFile = hasReleaseSigning
+        ? rootProject.file(releaseSigning.keystore)
+        : null
+
+if (!suppliedReleaseSigningValues.isEmpty() && !hasReleaseSigning) {
+    throw new GradleException(
+            "Frame Finder release signing is incomplete. Set FRAMEFINDER_KEYSTORE, " +
+                    "FRAMEFINDER_STORE_PASSWORD, FRAMEFINDER_KEY_ALIAS, and " +
+                    "FRAMEFINDER_KEY_PASSWORD."
+    )
+}
+
+android {
+    namespace "com.souravgoswami.framefinder"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.souravgoswami.framefinder"
+        minSdk 26
+        targetSdk 35
+        versionCode 35
+        versionName "1.0.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables.useSupportLibrary true
+
+        javaCompileOptions {
+            annotationProcessorOptions {
+                arguments += ["room.schemaLocation": "$projectDir/schemas"]
+            }
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile releaseKeystoreFile
+                storePassword releaseSigning.storePassword
+                keyAlias releaseSigning.keyAlias
+                keyPassword releaseSigning.keyPassword
+                enableV1Signing false
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing false
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        compose true
+        buildConfig true
+    }
+    packaging {
+        resources.excludes += [
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "META-INF/INDEX.LIST",
+                "META-INF/DEPENDENCIES"
+        ]
+    }
+    splits {
+        abi {
+            enable true
+            reset()
+            include(*frameFinderAbis)
+            universalApk frameFinderUniversalApk
+        }
+    }
+    sourceSets {
+        androidTest.assets.srcDir "$projectDir/schemas"
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        // Fast local builds keep the already dense models uncompressed. Release
+        // packages trade additional build time for a smaller download. The
+        // Gradle property remains available as an explicit comparison override.
+        def compressModels = frameFinderCompressModelsOverride
+                .getOrElse(variant.buildType == "release")
+        if (!compressModels) {
+            variant.androidResources.noCompress.add("onnx")
+        }
+    }
+}
+
+dependencies {
+    def composeBom = platform("androidx.compose:compose-bom:2024.12.01")
+    implementation composeBom
+    androidTestImplementation composeBom
+
+    implementation "androidx.core:core-ktx:1.15.0"
+    implementation "androidx.exifinterface:exifinterface:1.3.7"
+    implementation "androidx.activity:activity-compose:1.10.0"
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.8.7"
+    implementation "androidx.lifecycle:lifecycle-runtime-compose:2.8.7"
+    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7"
+    implementation "androidx.compose.ui:ui"
+    implementation "androidx.compose.ui:ui-tooling-preview"
+    implementation "androidx.compose.material3:material3"
+    implementation "androidx.compose.material:material-icons-extended"
+
+    implementation "androidx.room:room-runtime:2.6.1"
+    implementation "androidx.room:room-ktx:2.6.1"
+    kapt "androidx.room:room-compiler:2.6.1"
+    implementation "androidx.paging:paging-runtime:3.3.6"
+    implementation "androidx.paging:paging-compose:3.3.6"
+    implementation "androidx.work:work-runtime-ktx:2.10.0"
+    implementation "io.coil-kt:coil-compose:2.7.0"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.20.0"
+    implementation "com.google.mlkit:text-recognition:16.0.1"
+
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0"
+    androidTestImplementation "androidx.test.ext:junit:1.2.1"
+    androidTestImplementation "androidx.test.espresso:espresso-core:3.6.1"
+    androidTestImplementation "androidx.compose.ui:ui-test-junit4"
+    androidTestImplementation "androidx.room:room-testing:2.6.1"
+    debugImplementation "androidx.compose.ui:ui-tooling"
+    debugImplementation "androidx.compose.ui:ui-test-manifest"
+}
+
+kapt {
+    correctErrorTypes true
+}
+
+def verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
+    group = "verification"
+    description = "Verifies that the Frame Finder release signing key is configured."
+    notCompatibleWithConfigurationCache(
+            "Release signing credentials must not be persisted in the configuration cache."
+    )
+    inputs.property("releaseSigningConfigured", hasReleaseSigning)
+    inputs.property("releaseKeystorePath", releaseKeystoreFile?.absolutePath ?: "")
+
+    doLast {
+        if (!hasReleaseSigning) {
+            throw new GradleException(
+                    "Release signing is required. Run scripts/create-release-keystore.sh, " +
+                            "then source .framefinder-signing.env before building a release."
+            )
+        }
+
+        if (!releaseKeystoreFile.isFile()) {
+            throw new GradleException("Release keystore not found: ${releaseKeystoreFile}")
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "preReleaseBuild") {
+        dependsOn verifyReleaseSigning
+    }
+}

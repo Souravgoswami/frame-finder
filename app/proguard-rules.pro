@@ -1,0 +1,3 @@
+-keep class ai.onnxruntime.** { *; }
+-keep class com.microsoft.onnxruntime.** { *; }
+-dontwarn org.slf4j.**

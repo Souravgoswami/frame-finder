@@ -1,0 +1,34 @@
+*.iml
+.gradle/
+.kotlin/
+.idea/
+local.properties
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Private environment files. Example templates remain publishable.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.framefinder-signing.env
+framefinder-signing.env
+
+# Signing keys and private key containers.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pkcs12
+*.pem
+*.key
+*.p8
+
+# Local credential and signing property files.
+key.properties
+keystore.properties
+signing.properties
+credentials.properties
+secrets.properties
