@@ -105,6 +105,7 @@ class MediaStoreScanner(private val context: Context) {
                 val displayName = cursor.getString(nameColumn) ?: "Photo $id"
                 val mediaPath = if (pathColumn >= 0) cursor.stringOrNull(pathColumn) else null
                 val storagePath = storageFolder(mediaPath)
+                if (ExcludedFolders.isAlwaysExcluded(storagePath)) continue
                 if (ExcludedFolders.contains(storagePath, excludedFolders)) continue
                 if (DotPathVisibility.isHidden(displayName, mediaPath)) continue
                 val dateTaken = cursor.longOrNull(takenColumn)?.takeIf { it > 0L }
@@ -213,7 +214,9 @@ class MediaStoreScanner(private val context: Context) {
             val pathColumn = cursor.getColumnIndex(pathColumnName)
             while (cursor.moveToNext()) {
                 val mediaPath = if (pathColumn >= 0) cursor.stringOrNull(pathColumn) else null
-                storageFolder(mediaPath)?.let(folders::add)
+                storageFolder(mediaPath)
+                    ?.takeUnless(ExcludedFolders::isAlwaysExcluded)
+                    ?.let(folders::add)
             }
         }
         return folders.sortedWith(String.CASE_INSENSITIVE_ORDER)
@@ -254,6 +257,7 @@ class MediaStoreScanner(private val context: Context) {
                 val mediaPath = if (pathColumn >= 0) cursor.stringOrNull(pathColumn) else null
                 if (
                     !DotPathVisibility.isHidden(displayName, mediaPath) &&
+                    !ExcludedFolders.isAlwaysExcluded(storageFolder(mediaPath)) &&
                     !ExcludedFolders.contains(storageFolder(mediaPath), excludedFolders)
                 ) {
                     count++

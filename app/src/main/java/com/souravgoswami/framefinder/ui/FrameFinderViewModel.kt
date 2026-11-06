@@ -14,6 +14,7 @@ import com.souravgoswami.framefinder.ai.SearchModel
 import com.souravgoswami.framefinder.appContainer
 import com.souravgoswami.framefinder.data.AppPreferences
 import com.souravgoswami.framefinder.data.DEFAULT_SEARCH_STRICTNESS
+import com.souravgoswami.framefinder.data.DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS
 import com.souravgoswami.framefinder.data.ExcludedFolders
 import com.souravgoswami.framefinder.data.GalleryGrouping
 import com.souravgoswami.framefinder.data.GalleryItem
@@ -59,6 +60,7 @@ data class BackgroundWorkState(
 data class FrameFinderUiState(
     val results: List<SearchResult> = emptyList(),
     val query: String = "",
+    val similaritySource: PhotoGridItem? = null,
     val sort: ResultSort = ResultSort.RELEVANCE,
     val indexedCount: Int = 0,
     val indexStatusLoaded: Boolean = false,
@@ -89,6 +91,7 @@ data class FrameFinderUiState(
         visualSearchEnabled = true,
         filenameSearchEnabled = true,
         descriptionSearchEnabled = true,
+        ignoredNonOcrSearchWords = DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS,
         excludedFolders = emptySet(),
         storagePathsIndexed = false,
         searchModel = SearchModel.MOBILECLIP_S2,
@@ -116,11 +119,13 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
     private val mediaStoreScanner = MediaStoreScanner(application)
     private val initialPreferences = container.preferences.read()
     private val query = MutableStateFlow("")
+    private val similaritySource = MutableStateFlow<PhotoGridItem?>(null)
     private val sort = MutableStateFlow(initialPreferences.resultSort)
     private val ocrSearchEnabled = MutableStateFlow(initialPreferences.ocrSearchEnabled)
     private val visualSearchEnabled = MutableStateFlow(initialPreferences.visualSearchEnabled)
     private val filenameSearchEnabled = MutableStateFlow(initialPreferences.filenameSearchEnabled)
     private val descriptionSearchEnabled = MutableStateFlow(initialPreferences.descriptionSearchEnabled)
+    private val ignoredNonOcrSearchWords = MutableStateFlow(initialPreferences.ignoredNonOcrSearchWords)
     private val selectedModel = MutableStateFlow(initialPreferences.searchModel)
     private val ignoreFailedPhotos = MutableStateFlow(initialPreferences.ignoreFailedPhotos)
     private val searchStrictness = MutableStateFlow(initialPreferences.searchStrictness)
@@ -160,13 +165,24 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
         }
 
         viewModelScope.launch {
-            val baseSearchInputs = combine(
+            val searchMode = combine(
                 query.debounce(SEARCH_DEBOUNCE_MILLIS),
+                similaritySource
+            ) { currentQuery, source -> SearchMode(currentQuery, source) }
+            val baseSearchInputs = combine(
+                searchMode,
                 sort,
                 ocrSearchEnabled,
                 selectedModel
-            ) { currentQuery, currentSort, includeOcr, model ->
-                SearchInputs(currentQuery, currentSort, includeOcr, model, DEFAULT_SEARCH_STRICTNESS)
+            ) { mode, currentSort, includeOcr, model ->
+                SearchInputs(
+                    query = mode.query,
+                    similaritySource = mode.similaritySource,
+                    sort = currentSort,
+                    includeOcr = includeOcr,
+                    model = model,
+                    searchStrictness = DEFAULT_SEARCH_STRICTNESS
+                )
             }
             val searchInputs = combine(baseSearchInputs, searchStrictness) { inputs, strictness ->
                 inputs.copy(searchStrictness = strictness)
@@ -174,36 +190,49 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
             val searchSources = combine(
                 visualSearchEnabled,
                 filenameSearchEnabled,
-                descriptionSearchEnabled
-            ) { includeVisual, includeFilename, includeDescription ->
-                SearchSources(includeVisual, includeFilename, includeDescription)
+                descriptionSearchEnabled,
+                ignoredNonOcrSearchWords
+            ) { includeVisual, includeFilename, includeDescription, ignoredWords ->
+                SearchSources(includeVisual, includeFilename, includeDescription, ignoredWords)
             }
             combine(searchInputs, searchSources, searchRevision, query) { inputs, sources, _, liveQuery ->
                 LiveSearchInputs(
                     inputs = inputs.copy(
                         includeVisual = sources.includeVisual,
                         includeFilename = sources.includeFilename,
-                        includeDescription = sources.includeDescription
+                        includeDescription = sources.includeDescription,
+                        ignoredNonOcrWords = sources.ignoredNonOcrWords
                     ),
                     liveQuery = liveQuery
                 )
             }.collectLatest { request ->
-                if (request.inputs.query != request.liveQuery) return@collectLatest
                 val inputs = request.inputs
+                if (inputs.similaritySource == null && inputs.query != request.liveQuery) {
+                    return@collectLatest
+                }
+                val searchActive = inputs.query.isNotBlank() || inputs.similaritySource != null
                 _state.value = _state.value.copy(
                     sort = inputs.sort,
-                    searching = inputs.query.isNotBlank()
+                    searching = searchActive
                 )
-                val searched = repository.search(
-                    inputs.query,
-                    inputs.sort,
-                    inputs.includeVisual,
-                    inputs.includeFilename,
-                    inputs.includeDescription,
-                    inputs.includeOcr,
-                    inputs.model,
-                    inputs.searchStrictness
-                )
+                val searched = inputs.similaritySource?.let { source ->
+                    repository.findSimilarPhotos(
+                        sourceMediaId = source.mediaId,
+                        sort = inputs.sort,
+                        model = inputs.model,
+                        searchStrictness = inputs.searchStrictness
+                    )
+                } ?: repository.search(
+                        inputs.query,
+                        inputs.sort,
+                        inputs.includeVisual,
+                        inputs.includeFilename,
+                        inputs.includeDescription,
+                        inputs.includeOcr,
+                        inputs.model,
+                        inputs.searchStrictness,
+                        inputs.ignoredNonOcrWords
+                    )
                 val results = removeMissingPhotos(searched)
                 _state.value = _state.value.copy(
                     results = results,
@@ -259,17 +288,23 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
         }
         viewModelScope.launch {
             container.preferences.values.collect { preferences ->
+                val effectiveSort = if (similaritySource.value != null) {
+                    sort.value
+                } else {
+                    preferences.resultSort
+                }
                 ocrSearchEnabled.value = preferences.ocrSearchEnabled
                 visualSearchEnabled.value = preferences.visualSearchEnabled
                 filenameSearchEnabled.value = preferences.filenameSearchEnabled
                 descriptionSearchEnabled.value = preferences.descriptionSearchEnabled
+                ignoredNonOcrSearchWords.value = preferences.ignoredNonOcrSearchWords
                 selectedModel.value = preferences.searchModel
                 ignoreFailedPhotos.value = preferences.ignoreFailedPhotos
                 searchStrictness.value = preferences.searchStrictness
-                sort.value = preferences.resultSort
+                sort.value = effectiveSort
                 galleryGrouping.value = preferences.galleryGrouping
                 _state.value = _state.value.copy(
-                    sort = preferences.resultSort,
+                    sort = effectiveSort,
                     preferences = preferences,
                     modelReady = container.modelManager.isReady(preferences.searchModel)
                 )
@@ -278,14 +313,56 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun setQuery(value: String) {
-        _state.value = _state.value.copy(query = value, searching = value.isNotBlank())
+        val leavingSimilaritySearch = similaritySource.value != null
+        val restoredSort = if (leavingSimilaritySearch) {
+            container.preferences.read().resultSort
+        } else {
+            sort.value
+        }
+        similaritySource.value = null
+        if (leavingSimilaritySearch) sort.value = restoredSort
+        _state.value = _state.value.copy(
+            query = value,
+            similaritySource = null,
+            sort = restoredSort,
+            searching = value.isNotBlank()
+        )
         query.value = value
+    }
+
+    suspend fun findSimilarPhotos(photo: PhotoGridItem): Boolean {
+        val model = selectedModel.value
+        if (!repository.hasEmbedding(photo.mediaId, model)) return false
+
+        similaritySource.value = photo
+        query.value = ""
+        sort.value = ResultSort.RELEVANCE
+        _state.value = _state.value.copy(
+            query = "",
+            similaritySource = photo,
+            sort = ResultSort.RELEVANCE,
+            searching = true,
+            results = emptyList()
+        )
+        return true
+    }
+
+    fun clearSimilaritySearch() {
+        val restoredSort = container.preferences.read().resultSort
+        similaritySource.value = null
+        sort.value = restoredSort
+        _state.value = _state.value.copy(
+            similaritySource = null,
+            sort = restoredSort,
+            searching = false,
+            results = emptyList()
+        )
     }
 
     fun setSort(value: ResultSort) {
         _state.value = _state.value.copy(sort = value)
         sort.value = value
-        container.preferences.setResultSort(value)
+        if (similaritySource.value == null) container.preferences.setResultSort(value)
     }
 
     fun refreshContent() {
@@ -399,6 +476,8 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
     fun setVisualSearchEnabled(value: Boolean) = container.preferences.setVisualSearchEnabled(value)
     fun setFilenameSearchEnabled(value: Boolean) = container.preferences.setFilenameSearchEnabled(value)
     fun setDescriptionSearchEnabled(value: Boolean) = container.preferences.setDescriptionSearchEnabled(value)
+    fun setIgnoredNonOcrSearchWords(value: Set<String>) =
+        container.preferences.setIgnoredNonOcrSearchWords(value)
     fun refreshStorageFolders() {
         _state.value = _state.value.copy(storageFoldersLoading = true)
         viewModelScope.launch {
@@ -681,13 +760,20 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
 
     private data class SearchInputs(
         val query: String,
+        val similaritySource: PhotoGridItem?,
         val sort: ResultSort,
         val includeOcr: Boolean,
         val model: SearchModel,
         val searchStrictness: Int,
         val includeVisual: Boolean = true,
         val includeFilename: Boolean = true,
-        val includeDescription: Boolean = true
+        val includeDescription: Boolean = true,
+        val ignoredNonOcrWords: Set<String> = DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS
+    )
+
+    private data class SearchMode(
+        val query: String,
+        val similaritySource: PhotoGridItem?
     )
 
     private companion object {
@@ -697,7 +783,8 @@ class FrameFinderViewModel(application: Application) : AndroidViewModel(applicat
     private data class SearchSources(
         val includeVisual: Boolean,
         val includeFilename: Boolean,
-        val includeDescription: Boolean
+        val includeDescription: Boolean,
+        val ignoredNonOcrWords: Set<String>
     )
 
     private data class LiveSearchInputs(

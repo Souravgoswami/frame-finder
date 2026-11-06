@@ -16,12 +16,15 @@ Everything happens on your device. Your photos, searches, recognized text, and a
 ## Highlights
 
 - Search photos using ordinary descriptions with on-device AI.
+- Find visually similar photos directly from the photo viewer.
 - Find screenshots, receipts, documents, and signs using built-in text recognition.
-- Choose whether OCR, filenames, and media descriptions contribute to results.
+- Choose whether visual content, OCR, filenames, and photo descriptions contribute to results.
+- Ignore common or custom words in visual and metadata searches without hiding them from OCR.
 - Adjust search strictness without analyzing the library again.
-- Switch between grid and list views, group photos, and sort by relevance, date, name, or size.
-- Swipe between photos, zoom and pan, share, inspect metadata, open in a gallery, move to trash, or permanently delete.
-- Select multiple photos for batch deletion.
+- Switch between grid and list views, group photos, sort results, and quickly scroll through large libraries.
+- See the original search and why each photo matched while browsing results.
+- Swipe between photos, smoothly zoom and pan, share, save a copy, inspect metadata, open in a gallery, move to trash, or permanently delete.
+- Select multiple photos to share or remove them together.
 - Exclude folders without deleting their saved analysis.
 - Pause a scan safely after the active photos finish, then resume from completed work.
 - Export and import analysis data so reinstalling does not require starting from scratch.
@@ -96,13 +99,16 @@ Run the unit tests with:
 ./gradlew testDebugUnitTest
 ```
 
-The application ID is `com.souravgoswami.framefinder`. The current version is **1.0.0**.
+The application ID is `com.souravgoswami.framefinder`. The current version is **1.1.0**.
 
 For development builds, personal signing keys, release APKs, and Play Store bundles, see [DEVELOPMENT.md](DEVELOPMENT.md). The official release key and all developer keys remain outside Git.
+
+See [Changelog.md](Changelog.md) for the release history.
 
 ## Notes
 
 - OCR currently recognizes Latin-script text.
+- Ignored search words can be changed in Settings. They never affect OCR searches.
 - Visual search quality varies by subject. Search strictness can be adjusted from the search menu or Settings.
 - With Android's selected-photo permission, Frame Finder can search only the photos Android makes available to it.
 - Moving a backup to another phone does not move the original images. Entries that do not resolve to an available photo are ignored and cleaned up safely.

@@ -117,6 +117,38 @@ data class PhotoSearchRow(
     )
 }
 
+/** Lightweight projection for image-to-image similarity without loading OCR or descriptions. */
+data class PhotoVisualSearchRow(
+    val mediaId: Long,
+    val contentUri: String,
+    val displayName: String,
+    val mimeType: String?,
+    val dateTaken: Long?,
+    val dateAdded: Long,
+    val dateModified: Long,
+    val sizeBytes: Long,
+    val width: Int?,
+    val height: Int?,
+    val storagePath: String?,
+    val sortTime: Long,
+    val embedding: ByteArray?
+) {
+    fun toGridItem() = PhotoGridItem(
+        mediaId = mediaId,
+        contentUri = contentUri,
+        displayName = displayName,
+        mimeType = mimeType,
+        dateTaken = dateTaken,
+        dateAdded = dateAdded,
+        dateModified = dateModified,
+        sizeBytes = sizeBytes,
+        width = width,
+        height = height,
+        storagePath = storagePath,
+        sortTime = sortTime
+    )
+}
+
 data class PhotoIndexState(
     val mediaId: Long,
     val dateModified: Long,

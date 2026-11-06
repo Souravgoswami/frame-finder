@@ -29,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -47,6 +48,9 @@ import com.souravgoswami.framefinder.BuildConfig
 import com.souravgoswami.framefinder.ai.SearchModel
 import com.souravgoswami.framefinder.data.LaunchView
 import com.souravgoswami.framefinder.data.ThemeMode
+import com.souravgoswami.framefinder.data.DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS
+import com.souravgoswami.framefinder.data.formatIgnoredSearchWords
+import com.souravgoswami.framefinder.data.parseIgnoredSearchWords
 import kotlin.math.roundToInt
 
 @Composable
@@ -69,6 +73,7 @@ fun SettingsScreen(
     onVisualSearch: (Boolean) -> Unit,
     onFilenameSearch: (Boolean) -> Unit,
     onDescriptionSearch: (Boolean) -> Unit,
+    onIgnoredNonOcrSearchWords: (Set<String>) -> Unit,
     onUseSystemTrash: (Boolean) -> Unit,
     onIgnoreFailedPhotos: (Boolean) -> Unit,
     onOpenTrash: () -> Unit,
@@ -82,6 +87,9 @@ fun SettingsScreen(
 ) {
     var showExcludedFolders by remember { mutableStateOf(false) }
     var foldersNeedingIndexCheck by remember { mutableStateOf(emptySet<String>()) }
+    var ignoredWordsText by remember {
+        mutableStateOf(formatIgnoredSearchWords(state.preferences.ignoredNonOcrSearchWords))
+    }
     fun updateFolderExclusion(folder: String, excluded: Boolean) {
         onFolderExcluded(folder, excluded)
         foldersNeedingIndexCheck = if (excluded) {
@@ -556,6 +564,42 @@ fun SettingsScreen(
                 checked = state.preferences.ocrSearchEnabled,
                 onCheckedChange = onOcr
             )
+            Spacer(Modifier.height(14.dp))
+            Text("Ignored search words", fontWeight = FontWeight.SemiBold)
+            Text(
+                "These words are removed from Visual, Filename, and Description searches. " +
+                    "OCR searches always use every word you enter.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = ignoredWordsText,
+                onValueChange = { ignoredWordsText = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Words separated by commas") },
+                placeholder = { Text("photo, photos, image, images") },
+                minLines = 2
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = {
+                        ignoredWordsText = formatIgnoredSearchWords(DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS)
+                        onIgnoredNonOcrSearchWords(DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS)
+                    }
+                ) { Text("Use defaults") }
+                TextButton(
+                    enabled = parseIgnoredSearchWords(ignoredWordsText) !=
+                        state.preferences.ignoredNonOcrSearchWords,
+                    onClick = {
+                        onIgnoredNonOcrSearchWords(parseIgnoredSearchWords(ignoredWordsText))
+                    }
+                ) { Text("Apply") }
+            }
             Spacer(Modifier.height(6.dp))
             Text(
                 "Changes affect search immediately and do not delete saved data. Text recognition is always performed during analysis so it can be used at any time.",

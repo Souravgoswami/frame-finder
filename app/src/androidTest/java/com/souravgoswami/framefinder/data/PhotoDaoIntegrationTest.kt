@@ -128,6 +128,28 @@ class PhotoDaoIntegrationTest {
         )
     }
 
+    @Test
+    fun visualSearchPageUsesTheSelectedModelAndExcludesTheSourcePhoto() = runBlocking {
+        dao.upsert(photo(mediaId = 1L))
+        dao.upsert(photo(mediaId = 2L))
+        dao.upsert(photo(mediaId = 3L, isExcluded = true))
+        dao.upsert(photo(mediaId = 4L))
+        dao.upsertEmbedding(PhotoEmbeddingEntity(1L, "mobileclip-s2", byteArrayOf(1), 100L, null))
+        dao.upsertEmbedding(PhotoEmbeddingEntity(2L, "mobileclip-s2", byteArrayOf(2), 100L, null))
+        dao.upsertEmbedding(PhotoEmbeddingEntity(3L, "mobileclip-s2", byteArrayOf(3), 100L, null))
+        dao.upsertEmbedding(PhotoEmbeddingEntity(4L, "mobileclip-b", byteArrayOf(4), 100L, null))
+
+        val results = dao.getVisualSearchPageAfter(
+            modelId = "mobileclip-s2",
+            sourceMediaId = 1L,
+            afterMediaId = Long.MIN_VALUE,
+            limit = 20
+        )
+
+        assertEquals(listOf(2L), results.map(PhotoVisualSearchRow::mediaId))
+        assertEquals(byteArrayOf(2).toList(), results.single().embedding?.toList())
+    }
+
     private fun photo(
         mediaId: Long,
         lastSeenScan: Long = 1L,

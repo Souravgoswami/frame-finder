@@ -27,6 +27,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.material3.Surface
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
@@ -48,6 +57,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.paging.compose.collectAsLazyPagingItems
+import com.souravgoswami.framefinder.data.ExcludedFolders
 import com.souravgoswami.framefinder.data.LaunchView
 import com.souravgoswami.framefinder.data.PhotoGridItem
 import com.souravgoswami.framefinder.media.MediaStoreScanner
@@ -56,11 +66,13 @@ import com.souravgoswami.framefinder.ui.AppLockScreen
 import com.souravgoswami.framefinder.ui.HomeScreen
 import com.souravgoswami.framefinder.ui.InitialModelSelectionScreen
 import com.souravgoswami.framefinder.ui.PhotoViewerScreen
+import com.souravgoswami.framefinder.ui.PhotoViewerSearchContext
 import com.souravgoswami.framefinder.ui.FrameFinderViewModel
 import com.souravgoswami.framefinder.ui.SettingsScreen
 import com.souravgoswami.framefinder.ui.TrashScreen
 import com.souravgoswami.framefinder.ui.theme.FrameFinderTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -104,6 +116,10 @@ class MainActivity : ComponentActivity() {
         val galleryListState = rememberLazyListState()
         val searchListState = rememberLazyListState()
         var destination by remember { mutableStateOf<Destination>(Destination.Home) }
+        var similarityReturnDestination by remember {
+            mutableStateOf<Destination.Viewer?>(null)
+        }
+        var clearSimilarityAfterViewerTransition by remember { mutableStateOf(false) }
         var permissionRevision by remember { mutableIntStateOf(0) }
         var mediaRevision by remember { mutableIntStateOf(0) }
         var pendingAnalyzeAll by remember { mutableStateOf(false) }
@@ -281,6 +297,22 @@ class MainActivity : ComponentActivity() {
             galleryListState.scrollToItem(0)
         }
 
+        LaunchedEffect(destination, clearSimilarityAfterViewerTransition) {
+            if (
+                clearSimilarityAfterViewerTransition &&
+                destination is Destination.Viewer
+            ) {
+                delay(SIMILARITY_CLEAR_DELAY_MILLIS)
+                if (
+                    clearSimilarityAfterViewerTransition &&
+                    destination is Destination.Viewer
+                ) {
+                    viewModel.clearSimilaritySearch()
+                    clearSimilarityAfterViewerTransition = false
+                }
+            }
+        }
+
         LaunchedEffect(
             mediaRevision,
             access.hasAny,
@@ -421,9 +453,9 @@ class MainActivity : ComponentActivity() {
                 destination = if (remaining.isEmpty()) {
                     Destination.Home
                 } else {
-                    Destination.Viewer(
-                        remaining,
-                        removedIndex.coerceAtLeast(0).coerceAtMost(remaining.lastIndex)
+                    viewer.copy(
+                        photos = remaining,
+                        initialIndex = removedIndex.coerceAtLeast(0).coerceAtMost(remaining.lastIndex)
                     )
                 }
             }
@@ -665,6 +697,17 @@ class MainActivity : ComponentActivity() {
                 savePhotoCopy(photo)
             }
         }
+        fun clearSimilaritySearchAndReturn() {
+            val returnDestination = similarityReturnDestination
+            similarityReturnDestination = null
+            if (returnDestination == null) {
+                clearSimilarityAfterViewerTransition = false
+                viewModel.clearSimilaritySearch()
+            } else {
+                clearSimilarityAfterViewerTransition = true
+                destination = returnDestination
+            }
+        }
         FrameFinderTheme(state.preferences.themeMode) {
             Surface {
                 if (state.preferences.appLockEnabled && !appUnlocked) {
@@ -675,128 +718,193 @@ class MainActivity : ComponentActivity() {
                         initialLaunchView = state.preferences.launchView,
                         onContinue = viewModel::completeInitialModelSelection
                     )
-                } else when (val current = destination) {
-                    Destination.Home -> HomeScreen(
-                        state = state,
-                        gallery = gallery,
-                        galleryGridState = galleryGridState,
-                        searchGridState = searchGridState,
-                        galleryListState = galleryListState,
-                        searchListState = searchListState,
-                        hasPhotoAccess = access.hasAny,
-                        onRequestPhotoAccess = { requestPhotos() },
-                        onQueryChange = viewModel::setQuery,
-                        onSortChange = viewModel::setSort,
-                        onPhotoLayout = viewModel::setPhotoLayout,
-                        onThumbnailDensity = viewModel::setThumbnailDensity,
-                        onGalleryGrouping = viewModel::setGalleryGrouping,
-                        onSearchStrictness = viewModel::setSearchStrictness,
-                        onVisualSearch = viewModel::setVisualSearchEnabled,
-                        onFilenameSearch = viewModel::setFilenameSearchEnabled,
-                        onDescriptionSearch = viewModel::setDescriptionSearchEnabled,
-                        onIgnoreFailedPhotos = viewModel::setIgnoreFailedPhotos,
-                        onOcr = viewModel::setOcrSearchEnabled,
-                        onOpenSettings = {
-                            viewModel.refreshStorageFolders()
-                            destination = Destination.Settings
+                } else {
+                    AnimatedContent(
+                        targetState = destination,
+                        transitionSpec = {
+                            when {
+                                initialState is Destination.Viewer &&
+                                    targetState is Destination.Viewer -> {
+                                    EnterTransition.None togetherWith ExitTransition.None
+                                }
+                                targetState is Destination.Viewer -> {
+                                    (fadeIn(tween(180)) +
+                                        scaleIn(tween(220), initialScale = 0.96f)) togetherWith
+                                        fadeOut(tween(120))
+                                }
+                                initialState is Destination.Viewer -> {
+                                    fadeIn(tween(140)) togetherWith
+                                        (fadeOut(tween(180)) +
+                                            scaleOut(tween(180), targetScale = 0.96f))
+                                }
+                                else -> EnterTransition.None togetherWith ExitTransition.None
+                            }
                         },
-                        onOpenPhotos = { photos, initialIndex ->
-                            if (photos.isNotEmpty()) destination = Destination.Viewer(photos, initialIndex)
-                        },
-                        onSharePhotos = ::sharePhotos,
-                        canMoveToTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                            state.preferences.useSystemTrash,
-                        onTrashPhotos = ::trashPhotos,
-                        onDeletePhotos = ::deletePhotos,
-                        onPrepareAndIndex = {
-                            index(
-                                analyzeAll = state.preferences.scanPaused &&
-                                    state.preferences.scanAnalyzeAllPending,
-                                forceRebuild = state.preferences.scanPaused &&
-                                    state.preferences.scanForceRebuildPending
+                        label = "Frame Finder navigation"
+                    ) { current ->
+                        when (current) {
+                            Destination.Home -> HomeScreen(
+                                state = state,
+                                gallery = gallery,
+                                galleryGridState = galleryGridState,
+                                searchGridState = searchGridState,
+                                galleryListState = galleryListState,
+                                searchListState = searchListState,
+                                hasPhotoAccess = access.hasAny,
+                                onRequestPhotoAccess = { requestPhotos() },
+                                onQueryChange = { query ->
+                                    if (state.similaritySource != null) {
+                                        similarityReturnDestination = null
+                                    }
+                                    viewModel.setQuery(query)
+                                },
+                                onSortChange = viewModel::setSort,
+                                onPhotoLayout = viewModel::setPhotoLayout,
+                                onThumbnailDensity = viewModel::setThumbnailDensity,
+                                onGalleryGrouping = viewModel::setGalleryGrouping,
+                                onSearchStrictness = viewModel::setSearchStrictness,
+                                onVisualSearch = viewModel::setVisualSearchEnabled,
+                                onFilenameSearch = viewModel::setFilenameSearchEnabled,
+                                onDescriptionSearch = viewModel::setDescriptionSearchEnabled,
+                                onIgnoreFailedPhotos = viewModel::setIgnoreFailedPhotos,
+                                onOcr = viewModel::setOcrSearchEnabled,
+                                onOpenSettings = {
+                                    viewModel.refreshStorageFolders()
+                                    destination = Destination.Settings
+                                },
+                                onClearSimilaritySearch = ::clearSimilaritySearchAndReturn,
+                                onOpenPhotos = { photos, initialIndex, searchContext ->
+                                    if (photos.isNotEmpty()) {
+                                        destination = Destination.Viewer(photos, initialIndex, searchContext)
+                                    }
+                                },
+                                onSharePhotos = ::sharePhotos,
+                                canMoveToTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                                    state.preferences.useSystemTrash,
+                                onTrashPhotos = ::trashPhotos,
+                                onDeletePhotos = ::deletePhotos,
+                                onPrepareAndIndex = {
+                                    index(
+                                        analyzeAll = state.preferences.scanPaused &&
+                                            state.preferences.scanAnalyzeAllPending,
+                                        forceRebuild = state.preferences.scanPaused &&
+                                            state.preferences.scanForceRebuildPending
+                                    )
+                                },
+                                onImportAnalysis = {
+                                    analysisImportLauncher.launch(
+                                        arrayOf("application/zip", "application/octet-stream")
+                                    )
+                                },
+                                onAnalyzeAll = { index(analyzeAll = true) },
+                                onPauseWork = viewModel::pauseWork,
+                                onCancelScan = viewModel::cancelPausedWork,
+                                onRefreshContent = viewModel::refreshContent
                             )
-                        },
-                        onImportAnalysis = {
-                            analysisImportLauncher.launch(
-                                arrayOf("application/zip", "application/octet-stream")
+                            Destination.Settings -> SettingsScreen(
+                                state = state,
+                                hasPhotoAccess = access.hasAny,
+                                hasFullPhotoAccess = access.hasFull,
+                                supportsSystemTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
+                                onBack = { destination = Destination.Home },
+                                onRequestPhotoAccess = { requestPhotos() },
+                                onIndex = { index() },
+                                onResume = {
+                                    index(
+                                        analyzeAll = state.preferences.scanAnalyzeAllPending,
+                                        forceRebuild = state.preferences.scanForceRebuildPending
+                                    )
+                                },
+                                onAnalyzeAll = { index(analyzeAll = true) },
+                                onRebuild = { index(analyzeAll = true, forceRebuild = true) },
+                                onCancelScan = viewModel::cancelPausedWork,
+                                onCheckRestoredFolders = {
+                                    analysisConfirmationRequest = IndexRequest(analyzeAll = true)
+                                },
+                                onPause = viewModel::pauseWork,
+                                onSearchModel = viewModel::setSearchModel,
+                                onSearchStrictness = viewModel::setSearchStrictness,
+                                onVisualSearch = viewModel::setVisualSearchEnabled,
+                                onFilenameSearch = viewModel::setFilenameSearchEnabled,
+                                onDescriptionSearch = viewModel::setDescriptionSearchEnabled,
+                                onIgnoredNonOcrSearchWords = viewModel::setIgnoredNonOcrSearchWords,
+                                onUseSystemTrash = viewModel::setUseSystemTrash,
+                                onIgnoreFailedPhotos = viewModel::setIgnoreFailedPhotos,
+                                onOpenTrash = {
+                                    viewModel.refreshTrash()
+                                    destination = Destination.Trash
+                                },
+                                onExportAnalysis = {
+                                    analysisExportLauncher.launch("Frame Finder analysis ${java.time.LocalDate.now()}.ffbackup")
+                                },
+                                onImportAnalysis = {
+                                    analysisImportLauncher.launch(
+                                        arrayOf("application/zip", "application/octet-stream")
+                                    )
+                                },
+                                onLaunchView = viewModel::setLaunchView,
+                                onTheme = viewModel::setTheme,
+                                onFolderExcluded = viewModel::setFolderExcluded,
+                                onOcr = viewModel::setOcrSearchEnabled,
+                                onAppLock = { enabled ->
+                                    requestCredential(if (enabled) CredentialAction.ENABLE else CredentialAction.DISABLE)
+                                }
                             )
-                        },
-                        onAnalyzeAll = { index(analyzeAll = true) },
-                        onPauseWork = viewModel::pauseWork,
-                        onCancelScan = viewModel::cancelPausedWork,
-                        onRefreshContent = viewModel::refreshContent
-                    )
-                    Destination.Settings -> SettingsScreen(
-                        state = state,
-                        hasPhotoAccess = access.hasAny,
-                        hasFullPhotoAccess = access.hasFull,
-                        supportsSystemTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
-                        onBack = { destination = Destination.Home },
-                        onRequestPhotoAccess = { requestPhotos() },
-                        onIndex = { index() },
-                        onResume = {
-                            index(
-                                analyzeAll = state.preferences.scanAnalyzeAllPending,
-                                forceRebuild = state.preferences.scanForceRebuildPending
+                            is Destination.Viewer -> PhotoViewerScreen(
+                                photos = current.photos,
+                                initialIndex = current.initialIndex,
+                                searchContext = current.searchContext,
+                                onBack = {
+                                    if (clearSimilarityAfterViewerTransition) {
+                                        clearSimilarityAfterViewerTransition = false
+                                        viewModel.clearSimilaritySearch()
+                                    }
+                                    destination = Destination.Home
+                                },
+                                onShare = ::sharePhoto,
+                                onSave = ::savePhoto,
+                                onOpenGallery = ::openInGallery,
+                                onFindSimilar = { photo ->
+                                    lifecycleScope.launch {
+                                        if (viewModel.findSimilarPhotos(photo)) {
+                                            clearSimilarityAfterViewerTransition = false
+                                            val sourceIndex = current.photos
+                                                .indexOfFirst { it.mediaId == photo.mediaId }
+                                                .takeIf { it >= 0 }
+                                                ?: current.initialIndex
+                                            similarityReturnDestination = current.copy(
+                                                initialIndex = sourceIndex
+                                                    .coerceIn(0, current.photos.lastIndex)
+                                            )
+                                            destination = Destination.Home
+                                        } else {
+                                            Toast.makeText(
+                                                this@MainActivity,
+                                                "This photo has not been analyzed with " +
+                                                    "${state.preferences.searchModel.displayName}.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    }
+                                },
+                                onLoadMetadata = viewModel::indexedPhotoMetadata,
+                                onLoadFileMetadata = photoMetadataReader::read,
+                                canMoveToTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                                    state.preferences.useSystemTrash,
+                                onTrash = ::trashPhoto,
+                                onDelete = ::deletePhoto
                             )
-                        },
-                        onAnalyzeAll = { index(analyzeAll = true) },
-                        onRebuild = { index(analyzeAll = true, forceRebuild = true) },
-                        onCancelScan = viewModel::cancelPausedWork,
-                        onCheckRestoredFolders = {
-                            analysisConfirmationRequest = IndexRequest(analyzeAll = true)
-                        },
-                        onPause = viewModel::pauseWork,
-                        onSearchModel = viewModel::setSearchModel,
-                        onSearchStrictness = viewModel::setSearchStrictness,
-                        onVisualSearch = viewModel::setVisualSearchEnabled,
-                        onFilenameSearch = viewModel::setFilenameSearchEnabled,
-                        onDescriptionSearch = viewModel::setDescriptionSearchEnabled,
-                        onUseSystemTrash = viewModel::setUseSystemTrash,
-                        onIgnoreFailedPhotos = viewModel::setIgnoreFailedPhotos,
-                        onOpenTrash = {
-                            viewModel.refreshTrash()
-                            destination = Destination.Trash
-                        },
-                        onExportAnalysis = {
-                            analysisExportLauncher.launch("Frame Finder analysis ${java.time.LocalDate.now()}.ffbackup")
-                        },
-                        onImportAnalysis = {
-                            analysisImportLauncher.launch(
-                                arrayOf("application/zip", "application/octet-stream")
+                            Destination.Trash -> TrashScreen(
+                                photos = state.trashedPhotos,
+                                loading = state.trashLoading,
+                                error = state.trashError,
+                                onBack = { destination = Destination.Settings },
+                                onRefresh = viewModel::refreshTrash,
+                                onRestore = ::restorePhotos,
+                                onDeletePermanently = ::deletePhotos
                             )
-                        },
-                        onLaunchView = viewModel::setLaunchView,
-                        onTheme = viewModel::setTheme,
-                        onFolderExcluded = viewModel::setFolderExcluded,
-                        onOcr = viewModel::setOcrSearchEnabled,
-                        onAppLock = { enabled ->
-                            requestCredential(if (enabled) CredentialAction.ENABLE else CredentialAction.DISABLE)
                         }
-                    )
-                    is Destination.Viewer -> PhotoViewerScreen(
-                        photos = current.photos,
-                        initialIndex = current.initialIndex,
-                        onBack = { destination = Destination.Home },
-                        onShare = ::sharePhoto,
-                        onSave = ::savePhoto,
-                        onOpenGallery = ::openInGallery,
-                        onLoadMetadata = viewModel::indexedPhotoMetadata,
-                        onLoadFileMetadata = photoMetadataReader::read,
-                        canMoveToTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                            state.preferences.useSystemTrash,
-                        onTrash = ::trashPhoto,
-                        onDelete = ::deletePhoto
-                    )
-                    Destination.Trash -> TrashScreen(
-                        photos = state.trashedPhotos,
-                        loading = state.trashLoading,
-                        error = state.trashError,
-                        onBack = { destination = Destination.Settings },
-                        onRefresh = viewModel::refreshTrash,
-                        onRestore = ::restorePhotos,
-                        onDeletePermanently = ::deletePhotos
-                    )
+                    }
                 }
             }
             analysisConfirmationRequest
@@ -929,7 +1037,13 @@ class MainActivity : ComponentActivity() {
         BackHandler(enabled = state.preferences.appLockEnabled && !appUnlocked) { finish() }
         BackHandler(
             enabled = appUnlocked && destination != Destination.Home && destination != Destination.Trash
-        ) { destination = Destination.Home }
+        ) {
+            if (destination is Destination.Viewer && clearSimilarityAfterViewerTransition) {
+                clearSimilarityAfterViewerTransition = false
+                viewModel.clearSimilaritySearch()
+            }
+            destination = Destination.Home
+        }
     }
 
     private fun sharePhoto(photo: PhotoGridItem) {
@@ -1230,12 +1344,17 @@ class MainActivity : ComponentActivity() {
         data object Home : Destination
         data object Settings : Destination
         data object Trash : Destination
-        data class Viewer(val photos: List<PhotoGridItem>, val initialIndex: Int) : Destination
+        data class Viewer(
+            val photos: List<PhotoGridItem>,
+            val initialIndex: Int,
+            val searchContext: PhotoViewerSearchContext? = null
+        ) : Destination
     }
 
     private companion object {
         const val LOG_TAG = "FrameFinder"
         const val LARGE_LIBRARY_WARNING_THRESHOLD = 1_000
-        const val SAVED_PHOTO_DIRECTORY = "Frame Finder"
+        const val SAVED_PHOTO_DIRECTORY = ExcludedFolders.FRAME_FINDER_SAVE_DIRECTORY
+        const val SIMILARITY_CLEAR_DELAY_MILLIS = 250L
     }
 }

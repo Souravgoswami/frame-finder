@@ -2,6 +2,7 @@ package com.souravgoswami.framefinder.ui
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -84,6 +85,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,6 +94,7 @@ import coil.compose.AsyncImage
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.itemKey
+import com.souravgoswami.framefinder.R
 import com.souravgoswami.framefinder.data.LaunchView
 import com.souravgoswami.framefinder.data.GalleryGrouping
 import com.souravgoswami.framefinder.data.GalleryItem
@@ -129,7 +132,8 @@ fun HomeScreen(
     onIgnoreFailedPhotos: (Boolean) -> Unit,
     onOcr: (Boolean) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenPhotos: (List<PhotoGridItem>, Int) -> Unit,
+    onClearSimilaritySearch: () -> Unit,
+    onOpenPhotos: (List<PhotoGridItem>, Int, PhotoViewerSearchContext?) -> Unit,
     onSharePhotos: (List<PhotoGridItem>) -> Unit,
     canMoveToTrash: Boolean,
     onTrashPhotos: (List<PhotoGridItem>) -> Unit,
@@ -145,6 +149,7 @@ fun HomeScreen(
     var batchRemovalAction by remember { mutableStateOf<PhotoRemovalAction?>(null) }
     val selectionMode = selectedPhotos.isNotEmpty()
     val selectedPhotoIds = selectedPhotos.keys.toSet()
+    val searchActive = state.query.isNotBlank() || state.similaritySource != null
     val toggleSelection: (PhotoGridItem) -> Unit = { photo ->
         if (selectedPhotos.containsKey(photo.mediaId)) selectedPhotos.remove(photo.mediaId)
         else selectedPhotos[photo.mediaId] = photo
@@ -160,6 +165,13 @@ fun HomeScreen(
     }
     val matchReasons = remember(state.results) {
         state.results.associate { it.photo.mediaId to it.matchReasons }
+    }
+    val viewerSearchContext = remember(state.query, state.similaritySource, matchReasons) {
+        PhotoViewerSearchContext(
+            query = state.similaritySource?.let { "Similar to ${it.displayName}" }
+                ?: state.query.trim(),
+            matchReasonsByPhotoId = matchReasons
+        )
     }
     val thumbnailSize = thumbnailSize(state.preferences.thumbnailDensity)
     val incompleteCounts = incompleteAnalysisCounts(
@@ -183,10 +195,13 @@ fun HomeScreen(
         hasIncompleteAnalysisNotification
     ).count { it }
     var showNotifications by remember { mutableStateOf(false) }
-    LaunchedEffect(state.query, state.preferences.launchView) {
+    LaunchedEffect(state.query, state.similaritySource?.mediaId, state.preferences.launchView) {
         selectedPhotos.clear()
     }
-    BackHandler(enabled = selectionMode) { selectedPhotos.clear() }
+    BackHandler(enabled = selectionMode || state.similaritySource != null) {
+        if (selectionMode) selectedPhotos.clear()
+        else onClearSimilaritySearch()
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -199,13 +214,24 @@ fun HomeScreen(
             Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("Frame Finder", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text(
-                    "Find a memory, not a filename",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            Row(
+                Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_splash_icon),
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp)
                 )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("Frame Finder", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Find a memory, not a filename",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 BadgedBox(
@@ -261,6 +287,7 @@ fun HomeScreen(
                     }
                     SearchOptionsMenu(
                         searchStrictness = state.preferences.searchStrictness,
+                        similaritySearchActive = state.similaritySource != null,
                         visualSearchEnabled = state.preferences.visualSearchEnabled,
                         filenameSearchEnabled = state.preferences.filenameSearchEnabled,
                         descriptionSearchEnabled = state.preferences.descriptionSearchEnabled,
@@ -275,7 +302,9 @@ fun HomeScreen(
             },
             shape = RoundedCornerShape(8.dp)
         )
-        ActiveSearchSources(
+        state.similaritySource?.let { source ->
+            SimilaritySearchBanner(source, onClearSimilaritySearch)
+        } ?: ActiveSearchSources(
             visualEnabled = state.preferences.visualSearchEnabled,
             filenameEnabled = state.preferences.filenameSearchEnabled,
             descriptionEnabled = state.preferences.descriptionSearchEnabled,
@@ -346,7 +375,7 @@ fun HomeScreen(
             )
             else -> {
                 val visibleCount = state.indexedCount
-                if (state.query.isBlank() && state.preferences.launchView == LaunchView.SEARCH) {
+                if (!searchActive && state.preferences.launchView == LaunchView.SEARCH) {
                     EmptyState(
                         title = "What would you like to find?",
                         body = "$visibleCount indexed photos are ready. Search for an object, scene, date, or any enabled text source.",
@@ -373,14 +402,14 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                if (state.query.isBlank()) "$visibleCount photos" else "${state.results.size} matches",
+                                if (!searchActive) "$visibleCount photos" else "${state.results.size} matches",
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             SortMenu(
                                 selected = state.sort,
-                                searching = state.query.isNotBlank(),
+                                searching = searchActive,
                                 grouping = state.preferences.galleryGrouping,
                                 onSelected = onSortChange
                             )
@@ -394,31 +423,31 @@ fun HomeScreen(
                             )
                         }
                     }
-                    val galleryRefreshing = state.query.isBlank() && gallery != null &&
+                    val galleryRefreshing = !searchActive && gallery != null &&
                         gallery.loadState.refresh is LoadState.Loading && gallery.itemCount > 0
                     TouchPullToRefreshBox(
                         isRefreshing = galleryRefreshing || state.contentRefreshing,
                         onRefresh = {
                             if (!selectionMode) {
-                                if (state.query.isBlank()) gallery?.refresh()
+                                if (!searchActive) gallery?.refresh()
                                 onRefreshContent()
                             }
                         },
                         modifier = Modifier.fillMaxSize()
                     ) {
-                    if (state.query.isBlank() && gallery == null) {
+                    if (!searchActive && gallery == null) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
                     } else if (
-                        state.query.isBlank() && gallery != null &&
+                        !searchActive && gallery != null &&
                         gallery.loadState.refresh is LoadState.Loading && gallery.itemCount == 0
                     ) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
                     } else if (
-                        state.query.isBlank() && gallery != null &&
+                        !searchActive && gallery != null &&
                         gallery.loadState.refresh is LoadState.Error
                     ) {
                         EmptyState(
@@ -429,7 +458,7 @@ fun HomeScreen(
                             onAction = gallery::retry,
                             modifier = Modifier.fillMaxSize()
                         )
-                    } else if (state.query.isBlank() && gallery != null) {
+                    } else if (!searchActive && gallery != null) {
                         when (state.preferences.photoLayout) {
                             PhotoLayout.GRID -> PagedPhotoGrid(
                                 gallery,
@@ -455,65 +484,89 @@ fun HomeScreen(
                         }
                     } else if (state.results.isEmpty()) {
                         EmptyState(
-                            title = "No close matches",
-                            body = "Try a shorter query, a month and year, a different visual detail, or enable another search source.",
+                            title = if (state.similaritySource != null) {
+                                "No similar photos"
+                            } else {
+                                "No close matches"
+                            },
+                            body = if (state.similaritySource != null) {
+                                "No other analyzed photos are visually close enough. Try a lower search strictness."
+                            } else {
+                                "Try a shorter query, a month and year, a different visual detail, or enable another search source."
+                            },
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
                         when (state.preferences.photoLayout) {
-                            PhotoLayout.GRID -> LazyVerticalGrid(
-                                columns = GridCells.Adaptive(thumbnailSize),
-                                state = searchGridState,
-                                modifier = Modifier.fillMaxSize(),
-                                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                verticalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                itemsIndexed(
-                                    items = searchItems,
-                                    key = { _, item -> galleryItemKey(item) },
-                                    span = { _, item ->
-                                        if (item is GalleryItem.Header) GridItemSpan(maxLineSpan)
-                                        else GridItemSpan(1)
-                                    }
-                                ) { _, item ->
-                                    when (item) {
-                                        is GalleryItem.Header -> GalleryHeader(item.label)
-                                        is GalleryItem.Photo -> PhotoTile(
-                                            photo = item.photo,
-                                            matchReasons = matchReasons[item.photo.mediaId].orEmpty(),
-                                            selected = item.photo.mediaId in selectedPhotoIds,
-                                            onClick = {
-                                                if (selectionMode) toggleSelection(item.photo)
-                                                else openSearchPhoto(searchPhotos, item.photo, onOpenPhotos)
-                                            },
-                                            onLongClick = { toggleSelection(item.photo) }
-                                        )
+                            PhotoLayout.GRID -> Box(Modifier.fillMaxSize()) {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Adaptive(thumbnailSize),
+                                    state = searchGridState,
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    itemsIndexed(
+                                        items = searchItems,
+                                        key = { _, item -> galleryItemKey(item) },
+                                        span = { _, item ->
+                                            if (item is GalleryItem.Header) GridItemSpan(maxLineSpan)
+                                            else GridItemSpan(1)
+                                        }
+                                    ) { _, item ->
+                                        when (item) {
+                                            is GalleryItem.Header -> GalleryHeader(item.label)
+                                            is GalleryItem.Photo -> PhotoTile(
+                                                photo = item.photo,
+                                                matchReasons = matchReasons[item.photo.mediaId].orEmpty(),
+                                                selected = item.photo.mediaId in selectedPhotoIds,
+                                                onClick = {
+                                                    if (selectionMode) toggleSelection(item.photo)
+                                                    else openSearchPhoto(
+                                                        searchPhotos,
+                                                        item.photo,
+                                                        viewerSearchContext,
+                                                        onOpenPhotos
+                                                    )
+                                                },
+                                                onLongClick = { toggleSelection(item.photo) }
+                                            )
+                                        }
                                     }
                                 }
+                                LazyGridFastScrollbar(searchGridState)
                             }
-                            PhotoLayout.LIST -> LazyColumn(
-                                state = searchListState,
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                listItemsIndexed(
-                                    searchItems,
-                                    key = { _, item -> galleryItemKey(item) }
-                                ) { _, item ->
-                                    when (item) {
-                                        is GalleryItem.Header -> GalleryHeader(item.label)
-                                        is GalleryItem.Photo -> PhotoListRow(
-                                            photo = item.photo,
-                                            matchReasons = matchReasons[item.photo.mediaId].orEmpty(),
-                                            selected = item.photo.mediaId in selectedPhotoIds,
-                                            onClick = {
-                                                if (selectionMode) toggleSelection(item.photo)
-                                                else openSearchPhoto(searchPhotos, item.photo, onOpenPhotos)
-                                            },
-                                            onLongClick = { toggleSelection(item.photo) }
-                                        )
+                            PhotoLayout.LIST -> Box(Modifier.fillMaxSize()) {
+                                LazyColumn(
+                                    state = searchListState,
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listItemsIndexed(
+                                        searchItems,
+                                        key = { _, item -> galleryItemKey(item) }
+                                    ) { _, item ->
+                                        when (item) {
+                                            is GalleryItem.Header -> GalleryHeader(item.label)
+                                            is GalleryItem.Photo -> PhotoListRow(
+                                                photo = item.photo,
+                                                matchReasons = matchReasons[item.photo.mediaId].orEmpty(),
+                                                selected = item.photo.mediaId in selectedPhotoIds,
+                                                onClick = {
+                                                    if (selectionMode) toggleSelection(item.photo)
+                                                    else openSearchPhoto(
+                                                        searchPhotos,
+                                                        item.photo,
+                                                        viewerSearchContext,
+                                                        onOpenPhotos
+                                                    )
+                                                },
+                                                onLongClick = { toggleSelection(item.photo) }
+                                            )
+                                        }
                                     }
                                 }
+                                LazyListFastScrollbar(searchListState)
                             }
                         }
                     }
@@ -765,6 +818,45 @@ private fun SelectionBar(
 }
 
 @Composable
+private fun SimilaritySearchBanner(source: PhotoGridItem, onClear: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 7.dp),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 8.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            AsyncImage(
+                model = Uri.parse(source.contentUri),
+                contentDescription = null,
+                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(5.dp)),
+                contentScale = ContentScale.Crop
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Finding visually similar photos",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    source.displayName,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(onClick = onClear) {
+                Icon(Icons.Outlined.Clear, contentDescription = "Close similar photo search")
+            }
+        }
+    }
+}
+
+@Composable
 private fun ActiveSearchSources(
     visualEnabled: Boolean,
     filenameEnabled: Boolean,
@@ -806,6 +898,7 @@ private fun ActiveSearchSources(
 @Composable
 private fun SearchOptionsMenu(
     searchStrictness: Int,
+    similaritySearchActive: Boolean,
     visualSearchEnabled: Boolean,
     filenameSearchEnabled: Boolean,
     descriptionSearchEnabled: Boolean,
@@ -841,7 +934,7 @@ private fun SearchOptionsMenu(
                     value = strictness,
                     onValueChange = { strictness = it },
                     onValueChangeFinished = { onSearchStrictness(strictness.roundToInt()) },
-                    enabled = visualSearchEnabled,
+                    enabled = visualSearchEnabled || similaritySearchActive,
                     valueRange = 0f..100f,
                     steps = 19
                 )
@@ -1104,37 +1197,40 @@ private fun PagedPhotoGrid(
     selectionMode: Boolean,
     thumbnailSize: Dp,
     onToggleSelection: (PhotoGridItem) -> Unit,
-    onOpenPhotos: (List<PhotoGridItem>, Int) -> Unit
+    onOpenPhotos: (List<PhotoGridItem>, Int, PhotoViewerSearchContext?) -> Unit
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(thumbnailSize),
-        state = gridState,
-        modifier = Modifier.fillMaxSize(),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp)
-    ) {
-        items(
-            count = gallery.itemCount,
-            key = gallery.itemKey(::galleryItemKey),
-            span = { index ->
-                if (gallery.peek(index) is GalleryItem.Header) GridItemSpan(maxLineSpan)
-                else GridItemSpan(1)
-            }
-        ) { index ->
-            when (val item = gallery[index]) {
-                is GalleryItem.Header -> GalleryHeader(item.label)
-                is GalleryItem.Photo -> PhotoTile(
-                    photo = item.photo,
-                    selected = item.photo.mediaId in selectedPhotoIds,
-                    onClick = {
-                        if (selectionMode) onToggleSelection(item.photo)
-                        else openPagedPhoto(gallery, item.photo, onOpenPhotos)
-                    },
-                    onLongClick = { onToggleSelection(item.photo) }
-                )
-                null -> Unit
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(thumbnailSize),
+            state = gridState,
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            items(
+                count = gallery.itemCount,
+                key = gallery.itemKey(::galleryItemKey),
+                span = { index ->
+                    if (gallery.peek(index) is GalleryItem.Header) GridItemSpan(maxLineSpan)
+                    else GridItemSpan(1)
+                }
+            ) { index ->
+                when (val item = gallery[index]) {
+                    is GalleryItem.Header -> GalleryHeader(item.label)
+                    is GalleryItem.Photo -> PhotoTile(
+                        photo = item.photo,
+                        selected = item.photo.mediaId in selectedPhotoIds,
+                        onClick = {
+                            if (selectionMode) onToggleSelection(item.photo)
+                            else openPagedPhoto(gallery, item.photo, onOpenPhotos)
+                        },
+                        onLongClick = { onToggleSelection(item.photo) }
+                    )
+                    null -> Unit
+                }
             }
         }
+        LazyGridFastScrollbar(gridState)
     }
 }
 
@@ -1145,31 +1241,34 @@ private fun PagedPhotoList(
     selectedPhotoIds: Set<Long>,
     selectionMode: Boolean,
     onToggleSelection: (PhotoGridItem) -> Unit,
-    onOpenPhotos: (List<PhotoGridItem>, Int) -> Unit
+    onOpenPhotos: (List<PhotoGridItem>, Int, PhotoViewerSearchContext?) -> Unit
 ) {
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        items(
-            count = gallery.itemCount,
-            key = gallery.itemKey(::galleryItemKey)
-        ) { index ->
-            when (val item = gallery[index]) {
-                is GalleryItem.Header -> GalleryHeader(item.label)
-                is GalleryItem.Photo -> PhotoListRow(
-                    photo = item.photo,
-                    selected = item.photo.mediaId in selectedPhotoIds,
-                    onClick = {
-                        if (selectionMode) onToggleSelection(item.photo)
-                        else openPagedPhoto(gallery, item.photo, onOpenPhotos)
-                    },
-                    onLongClick = { onToggleSelection(item.photo) }
-                )
-                null -> Unit
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            items(
+                count = gallery.itemCount,
+                key = gallery.itemKey(::galleryItemKey)
+            ) { index ->
+                when (val item = gallery[index]) {
+                    is GalleryItem.Header -> GalleryHeader(item.label)
+                    is GalleryItem.Photo -> PhotoListRow(
+                        photo = item.photo,
+                        selected = item.photo.mediaId in selectedPhotoIds,
+                        onClick = {
+                            if (selectionMode) onToggleSelection(item.photo)
+                            else openPagedPhoto(gallery, item.photo, onOpenPhotos)
+                        },
+                        onLongClick = { onToggleSelection(item.photo) }
+                    )
+                    null -> Unit
+                }
             }
         }
+        LazyListFastScrollbar(listState)
     }
 }
 
@@ -1181,20 +1280,21 @@ private fun galleryItemKey(item: GalleryItem): Any = when (item) {
 private fun openPagedPhoto(
     gallery: LazyPagingItems<GalleryItem>,
     photo: PhotoGridItem,
-    onOpenPhotos: (List<PhotoGridItem>, Int) -> Unit
+    onOpenPhotos: (List<PhotoGridItem>, Int, PhotoViewerSearchContext?) -> Unit
 ) {
     val loadedPhotos = gallery.itemSnapshotList.items.mapNotNull { (it as? GalleryItem.Photo)?.photo }
     val loadedIndex = loadedPhotos.indexOfFirst { it.mediaId == photo.mediaId }
-    if (loadedIndex >= 0) onOpenPhotos(loadedPhotos, loadedIndex)
+    if (loadedIndex >= 0) onOpenPhotos(loadedPhotos, loadedIndex, null)
 }
 
 private fun openSearchPhoto(
     photos: List<PhotoGridItem>,
     photo: PhotoGridItem,
-    onOpenPhotos: (List<PhotoGridItem>, Int) -> Unit
+    searchContext: PhotoViewerSearchContext,
+    onOpenPhotos: (List<PhotoGridItem>, Int, PhotoViewerSearchContext?) -> Unit
 ) {
     val index = photos.indexOfFirst { it.mediaId == photo.mediaId }
-    if (index >= 0) onOpenPhotos(photos, index)
+    if (index >= 0) onOpenPhotos(photos, index, searchContext)
 }
 
 @Composable

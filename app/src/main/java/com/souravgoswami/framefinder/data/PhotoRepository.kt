@@ -151,8 +151,9 @@ class PhotoRepository(
             pageSize = GALLERY_PAGE_SIZE,
             initialLoadSize = GALLERY_INITIAL_SIZE,
             prefetchDistance = GALLERY_PREFETCH_DISTANCE,
-            enablePlaceholders = false,
-            maxSize = GALLERY_MAX_SIZE
+            enablePlaceholders = true,
+            maxSize = GALLERY_MAX_SIZE,
+            jumpThreshold = GALLERY_MAX_SIZE
         ),
         pagingSourceFactory = { PhotoPagingSource(dao, sort, grouping) }
     ).flow.map { pagingData ->
@@ -176,14 +177,19 @@ class PhotoRepository(
         includeDescription: Boolean,
         includeOcr: Boolean,
         model: SearchModel,
-        searchStrictness: Int
+        searchStrictness: Int,
+        ignoredNonOcrWords: Set<String>
     ): List<SearchResult> = withContext(Dispatchers.Default) {
         if (query.isBlank()) return@withContext emptyList()
 
         val parsed = SearchQueryParser.parse(query)
-        val queryVector = if (includeVisual && models.isReady(model) && dao.hasEmbedding(model.id)) {
+        val nonOcrQuery = parsed.withoutWords(ignoredNonOcrWords)
+        val visualQuery = nonOcrQuery.normalized
+        val queryVector = if (
+            includeVisual && visualQuery.isNotBlank() && models.isReady(model) && dao.hasEmbedding(model.id)
+        ) {
             try {
-                embedder.encodeText(query, model)
+                embedder.encodeText(visualQuery, model)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -210,7 +216,8 @@ class PhotoRepository(
                     query = parsed,
                     includeFilename = includeFilename,
                     includeDescription = includeDescription,
-                    includeOcr = includeOcr
+                    includeOcr = includeOcr,
+                    nonOcrQuery = nonOcrQuery
                 )
                 var metadataScore = textMatch.score
                 if (parsed.date != null) metadataScore += 0.35f
@@ -297,6 +304,77 @@ class PhotoRepository(
         }.toList()
     }
 
+    suspend fun hasEmbedding(mediaId: Long, model: SearchModel): Boolean =
+        withContext(Dispatchers.IO) {
+            dao.getEmbeddingState(mediaId, model.id)?.embedding != null
+        }
+
+    suspend fun findSimilarPhotos(
+        sourceMediaId: Long,
+        sort: ResultSort,
+        model: SearchModel,
+        searchStrictness: Int
+    ): List<SearchResult> = withContext(Dispatchers.Default) {
+        val sourceEmbedding = dao.getEmbeddingState(sourceMediaId, model.id)?.embedding
+            ?: return@withContext emptyList()
+        val sourceVector = runCatching { VectorCodec.decode(sourceEmbedding) }
+            .getOrElse { return@withContext emptyList() }
+        val candidates = ArrayList<SimilarPhotoCandidate>()
+        var bestSimilarity = -1f
+        var afterMediaId = Long.MIN_VALUE
+
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val page = dao.getVisualSearchPageAfter(
+                modelId = model.id,
+                sourceMediaId = sourceMediaId,
+                afterMediaId = afterMediaId,
+                limit = SEARCH_PAGE_SIZE
+            )
+            if (page.isEmpty()) break
+
+            page.forEach { photo ->
+                val embedding = photo.embedding ?: return@forEach
+                val similarity = VectorCodec.cosineNormalized(sourceVector, embedding)
+                bestSimilarity = maxOf(bestSimilarity, similarity)
+                if (similarity >= MIN_IMAGE_SIMILARITY_SCORE) {
+                    candidates += SimilarPhotoCandidate(photo.toGridItem(), similarity)
+                }
+            }
+
+            afterMediaId = page.last().mediaId
+            if (page.size < SEARCH_PAGE_SIZE) break
+        }
+
+        val cutoff = similarPhotoCutoff(bestSimilarity, searchStrictness)
+        val matches = candidates.asSequence()
+            .filter { it.similarity >= cutoff }
+            .map {
+                SearchResult(
+                    photo = it.photo,
+                    relevance = it.similarity,
+                    matchReasons = setOf(SearchMatchReason.VISUAL)
+                )
+            }
+
+        when (sort) {
+            ResultSort.RELEVANCE -> matches.sortedWith(
+                compareByDescending<SearchResult> { it.relevance }.thenByDescending { it.photo.sortTime }
+            )
+            ResultSort.NEWEST -> matches.sortedByDescending { it.photo.sortTime }
+            ResultSort.OLDEST -> matches.sortedBy { it.photo.sortTime }
+            ResultSort.NAME -> matches.sortedWith(SEARCH_NAME_COMPARATOR)
+            ResultSort.LARGEST -> matches.sortedWith(
+                compareByDescending<SearchResult> { it.photo.sizeBytes }
+                    .thenByDescending { it.photo.sortTime }
+            )
+            ResultSort.SMALLEST -> matches.sortedWith(
+                compareBy<SearchResult> { it.photo.sizeBytes }
+                    .thenByDescending { it.photo.sortTime }
+            )
+        }.toList()
+    }
+
     suspend fun clear() = dao.clear()
 
     suspend fun removeFromIndex(mediaId: Long) = dao.deleteByMediaId(mediaId)
@@ -312,7 +390,6 @@ class PhotoRepository(
     }
 
     private companion object {
-        const val GALLERY_PAGE_SIZE = 120
         const val GALLERY_INITIAL_SIZE = 240
         const val GALLERY_PREFETCH_DISTANCE = 60
         const val GALLERY_MAX_SIZE = 600
@@ -349,6 +426,8 @@ private suspend fun <T> List<T>.forEachBatch(block: suspend (List<T>) -> Unit) {
 }
 
 private const val PHOTO_SYNC_DATABASE_BATCH_SIZE = 500
+private const val GALLERY_PAGE_SIZE = 120
+private const val MIN_IMAGE_SIMILARITY_SCORE = 0.45f
 
 private class PhotoPagingSource(
     private val dao: PhotoDao,
@@ -356,7 +435,9 @@ private class PhotoPagingSource(
     private val grouping: GalleryGrouping
 ) : PagingSource<Int, PhotoGridItem>() {
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, PhotoGridItem> = try {
-        val offset = params.key ?: 0
+        val totalCount = dao.galleryPhotoCount()
+        val requestedOffset = params.key ?: 0
+        val offset = if (totalCount == 0) 0 else requestedOffset.coerceIn(0, totalCount - 1)
         val photos = when {
             grouping != GalleryGrouping.FOLDER && (sort == ResultSort.NEWEST || sort == ResultSort.RELEVANCE) ->
                 dao.getGalleryPageNewest(params.loadSize, offset)
@@ -366,8 +447,10 @@ private class PhotoPagingSource(
         }
         LoadResult.Page(
             data = photos,
-            prevKey = if (offset == 0) null else maxOf(0, offset - params.loadSize),
-            nextKey = if (photos.size < params.loadSize) null else offset + photos.size
+            prevKey = if (offset == 0) null else maxOf(0, offset - GALLERY_PAGE_SIZE),
+            nextKey = if (offset + photos.size >= totalCount) null else offset + photos.size,
+            itemsBefore = offset,
+            itemsAfter = maxOf(0, totalCount - offset - photos.size)
         )
     } catch (exception: CancellationException) {
         throw exception
@@ -377,8 +460,11 @@ private class PhotoPagingSource(
 
     override fun getRefreshKey(state: PagingState<Int, PhotoGridItem>): Int? {
         val anchor = state.anchorPosition ?: return null
-        return maxOf(0, anchor - state.config.initialLoadSize / 2)
+        val centeredOffset = maxOf(0, anchor - state.config.initialLoadSize / 2)
+        return centeredOffset - centeredOffset % state.config.pageSize
     }
+
+    override val jumpingSupported: Boolean = true
 }
 
 internal fun semanticMatchCutoff(
@@ -398,6 +484,16 @@ private data class ScoredCandidate(
     val metadataScore: Float,
     val keepRegardlessOfSemantic: Boolean,
     val matchReasons: Set<SearchMatchReason>
+)
+
+private data class SimilarPhotoCandidate(
+    val photo: PhotoGridItem,
+    val similarity: Float
+)
+
+internal fun similarPhotoCutoff(bestSimilarity: Float, strictness: Int): Float = maxOf(
+    MIN_IMAGE_SIMILARITY_SCORE,
+    bestSimilarity - semanticDistanceForStrictness(strictness)
 )
 
 internal fun combinedSearchRelevance(semantic: Float, metadataScore: Float, semanticCutoff: Float): Float =
@@ -423,7 +519,8 @@ internal object TextRelevanceScorer {
         query: ParsedSearchQuery,
         includeFilename: Boolean = true,
         includeDescription: Boolean = true,
-        includeOcr: Boolean = true
+        includeOcr: Boolean = true,
+        nonOcrQuery: ParsedSearchQuery = query
     ): Float = evaluate(
         name,
         description,
@@ -431,7 +528,8 @@ internal object TextRelevanceScorer {
         query,
         includeFilename,
         includeDescription,
-        includeOcr
+        includeOcr,
+        nonOcrQuery
     ).score
 
     fun evaluate(
@@ -441,38 +539,45 @@ internal object TextRelevanceScorer {
         query: ParsedSearchQuery,
         includeFilename: Boolean = true,
         includeDescription: Boolean = true,
-        includeOcr: Boolean = true
+        includeOcr: Boolean = true,
+        nonOcrQuery: ParsedSearchQuery = query
     ): Evaluation {
         val searchableName = if (includeFilename) name else ""
         val searchableDescription = if (includeDescription) description else ""
         val searchableOcr = if (includeOcr) ocrText else ""
-        val exactName = searchableName.containsSearch(query.normalized)
-        val exactDescription = searchableDescription.containsSearch(query.normalized)
-        val exactOcr = searchableOcr.containsSearch(query.normalized)
+        val metadataRequiresCompletePhrase = nonOcrQuery.literalTerms.size > 1
+        val ocrRequiresCompletePhrase = query.literalTerms.size > 1
+        val exactName = searchableName.containsSearchQuery(nonOcrQuery, metadataRequiresCompletePhrase)
+        val exactDescription = searchableDescription.containsSearchQuery(nonOcrQuery, metadataRequiresCompletePhrase)
+        val exactOcr = searchableOcr.containsSearchQuery(query, ocrRequiresCompletePhrase)
         var score = 0f
         if (exactName || exactDescription) {
-            score += 0.55f
+            score += if (metadataRequiresCompletePhrase) 0.85f else 0.55f
         }
         if (exactOcr) {
-            score += 0.20f
+            score += if (ocrRequiresCompletePhrase) 0.35f else 0.20f
         }
         var nameTermMatched = false
         var descriptionTermMatched = false
         var ocrTermMatched = false
-        if (query.terms.isNotEmpty()) {
+        if (!metadataRequiresCompletePhrase && nonOcrQuery.terms.isNotEmpty()) {
             var metadataHits = 0
-            var ocrHits = 0
-            query.terms.forEach { term ->
+            nonOcrQuery.terms.forEach { term ->
                 val nameHit = searchableName.containsSearch(term)
                 val descriptionHit = searchableDescription.containsSearch(term)
-                val ocrHit = searchableOcr.containsSearch(term)
                 if (nameHit || descriptionHit) metadataHits++
-                if (ocrHit) ocrHits++
                 nameTermMatched = nameTermMatched || nameHit
                 descriptionTermMatched = descriptionTermMatched || descriptionHit
+            }
+            score += metadataHits.toFloat() / nonOcrQuery.terms.size * 0.30f
+        }
+        if (!ocrRequiresCompletePhrase && query.terms.isNotEmpty()) {
+            var ocrHits = 0
+            query.terms.forEach { term ->
+                val ocrHit = searchableOcr.containsSearch(term)
+                if (ocrHit) ocrHits++
                 ocrTermMatched = ocrTermMatched || ocrHit
             }
-            score += metadataHits.toFloat() / query.terms.size * 0.30f
             score += ocrHits.toFloat() / query.terms.size * 0.15f
         }
         val reasons = buildSet {
@@ -484,7 +589,58 @@ internal object TextRelevanceScorer {
     }
 
     private fun String.containsSearch(value: String): Boolean =
-        value.isNotEmpty() && contains(value, ignoreCase = true)
+        isNotEmpty() && value.isNotEmpty() && contains(value, ignoreCase = true)
+
+    private fun String.containsSearchQuery(
+        query: ParsedSearchQuery,
+        requiresCompletePhrase: Boolean
+    ): Boolean = if (requiresCompletePhrase) {
+        containsTokenPhrase(query.literalTerms)
+    } else {
+        containsSearch(query.normalized)
+    }
+
+    private fun String.containsTokenPhrase(tokens: List<String>): Boolean {
+        if (isEmpty() || tokens.isEmpty()) return false
+        var sourceIndex = 0
+        var matchedTokens = 0
+        while (sourceIndex < length) {
+            while (sourceIndex < length && !this[sourceIndex].isLetterOrDigit()) sourceIndex++
+            val tokenStart = sourceIndex
+            while (sourceIndex < length && this[sourceIndex].isLetterOrDigit()) sourceIndex++
+            val tokenLength = sourceIndex - tokenStart
+            if (tokenLength == 0) break
+
+            val expected = tokens[matchedTokens]
+            val matchesExpected = tokenLength == expected.length && regionMatches(
+                thisOffset = tokenStart,
+                other = expected,
+                otherOffset = 0,
+                length = tokenLength,
+                ignoreCase = true
+            )
+            if (matchesExpected) {
+                matchedTokens++
+                if (matchedTokens == tokens.size) return true
+            } else {
+                val first = tokens.first()
+                matchedTokens = if (
+                    tokenLength == first.length && regionMatches(
+                        thisOffset = tokenStart,
+                        other = first,
+                        otherOffset = 0,
+                        length = tokenLength,
+                        ignoreCase = true
+                    )
+                ) {
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+        return false
+    }
 }
 
 private val SEARCH_NAME_COMPARATOR =

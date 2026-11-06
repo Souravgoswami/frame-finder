@@ -25,4 +25,13 @@ class ExcludedFoldersTest {
     fun ignoresMissingStoragePath() {
         assertFalse(ExcludedFolders.contains(null, setOf("Pictures")))
     }
+
+    @Test
+    fun alwaysExcludesFrameFinderSavedCopies() {
+        assertTrue(ExcludedFolders.isAlwaysExcluded("Download/Frame Finder"))
+        assertTrue(ExcludedFolders.isAlwaysExcluded("Download/Frame Finder/Shared"))
+        assertTrue(ExcludedFolders.isAlwaysExcluded("/storage/emulated/0/Download/Frame Finder"))
+        assertFalse(ExcludedFolders.isAlwaysExcluded("Download/Frame Finder Backup"))
+        assertFalse(ExcludedFolders.isAlwaysExcluded("Pictures/Frame Finder"))
+    }
 }

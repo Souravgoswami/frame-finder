@@ -83,6 +83,27 @@ interface PhotoDao {
     ): List<PhotoSearchRow>
 
     @Query(
+        """SELECT p.mediaId, p.contentUri, p.displayName, p.mimeType, p.dateTaken, p.dateAdded,
+            p.dateModified, p.sizeBytes, p.width, p.height, p.storagePath, p.sortTime,
+            e.embedding
+            FROM photos AS p
+            INNER JOIN photo_embeddings AS e
+                ON e.mediaId = p.mediaId AND e.modelId = :modelId
+            WHERE p.mediaId > :afterMediaId
+                AND p.mediaId != :sourceMediaId
+                AND p.isTrashed = 0 AND p.isExcluded = 0 AND p.isDotHidden = 0
+                AND e.embedding IS NOT NULL
+            ORDER BY p.mediaId
+            LIMIT :limit"""
+    )
+    suspend fun getVisualSearchPageAfter(
+        modelId: String,
+        sourceMediaId: Long,
+        afterMediaId: Long,
+        limit: Int
+    ): List<PhotoVisualSearchRow>
+
+    @Query(
         """SELECT EXISTS(
             SELECT 1 FROM photo_embeddings AS e
             INNER JOIN photos AS p ON p.mediaId = e.mediaId
@@ -123,6 +144,9 @@ interface PhotoDao {
 
     @Query("SELECT COUNT(*) FROM photos WHERE isTrashed = 0 AND isExcluded = 0 AND isDotHidden = 0")
     fun observeCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM photos WHERE isTrashed = 0 AND isExcluded = 0 AND isDotHidden = 0")
+    suspend fun galleryPhotoCount(): Int
 
     @Query(
         """SELECT COUNT(*) FROM photo_embeddings AS e
@@ -269,15 +293,30 @@ interface PhotoDao {
     )
     suspend fun excludeStorageFolder(folder: String): Int
 
+    @Query(
+        """UPDATE photos SET isExcluded = 1
+            WHERE isExcluded = 0 AND (
+                storagePath = :folder
+                OR storagePath LIKE :folder || '/%'
+                OR storagePath LIKE '%/' || :folder
+                OR storagePath LIKE '%/' || :folder || '/%'
+            )"""
+    )
+    suspend fun excludeSystemStorageFolder(folder: String): Int
+
     @Transaction
     suspend fun syncExcludedFolders(folders: Collection<String>) {
         val normalizedFolders = folders.mapNotNull(ExcludedFolders::normalize).toSet()
         getExcludedPhotoStates()
-            .filterNot { ExcludedFolders.contains(it.storagePath, normalizedFolders) }
+            .filterNot {
+                ExcludedFolders.contains(it.storagePath, normalizedFolders) ||
+                    ExcludedFolders.isAlwaysExcluded(it.storagePath)
+            }
             .map(PhotoExclusionState::mediaId)
             .chunked(DATABASE_UPDATE_BATCH_SIZE)
             .forEach { includePhotos(it) }
         normalizedFolders.forEach { excludeStorageFolder(it) }
+        excludeSystemStorageFolder(ExcludedFolders.FRAME_FINDER_SAVE_FOLDER)
     }
 
     @Query("DELETE FROM photos")

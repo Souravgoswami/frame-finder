@@ -17,6 +17,7 @@ data class AppPreferences(
     val visualSearchEnabled: Boolean,
     val filenameSearchEnabled: Boolean,
     val descriptionSearchEnabled: Boolean,
+    val ignoredNonOcrSearchWords: Set<String>,
     val excludedFolders: Set<String>,
     val storagePathsIndexed: Boolean,
     val searchModel: SearchModel,
@@ -74,6 +75,11 @@ class FrameFinderPreferences(context: Context) {
         visualSearchEnabled = preferences.getBoolean(KEY_SEARCH_VISUAL, true),
         filenameSearchEnabled = preferences.getBoolean(KEY_SEARCH_FILENAMES, true),
         descriptionSearchEnabled = preferences.getBoolean(KEY_SEARCH_DESCRIPTIONS, true),
+        ignoredNonOcrSearchWords = preferences
+            .getStringSet(KEY_IGNORED_NON_OCR_SEARCH_WORDS, DEFAULT_IGNORED_NON_OCR_SEARCH_WORDS)
+            .orEmpty()
+            .flatMap(::parseIgnoredSearchWords)
+            .toSet(),
         excludedFolders = preferences.getStringSet(KEY_EXCLUDED_FOLDERS, emptySet())
             .orEmpty()
             .mapNotNull(ExcludedFolders::normalize)
@@ -126,6 +132,11 @@ class FrameFinderPreferences(context: Context) {
 
     fun setDescriptionSearchEnabled(value: Boolean) {
         preferences.edit().putBoolean(KEY_SEARCH_DESCRIPTIONS, value).apply()
+    }
+
+    fun setIgnoredNonOcrSearchWords(value: Set<String>) {
+        val normalized = value.flatMap(::parseIgnoredSearchWords).toSet()
+        preferences.edit().putStringSet(KEY_IGNORED_NON_OCR_SEARCH_WORDS, normalized).apply()
     }
 
     fun setExcludedFolders(value: Set<String>) {
@@ -234,6 +245,7 @@ class FrameFinderPreferences(context: Context) {
         const val KEY_SEARCH_VISUAL = "search_visual"
         const val KEY_SEARCH_FILENAMES = "search_filenames"
         const val KEY_SEARCH_DESCRIPTIONS = "search_descriptions"
+        const val KEY_IGNORED_NON_OCR_SEARCH_WORDS = "ignored_non_ocr_search_words_v1"
         const val LEGACY_KEY_SHOW_DOT_ITEMS = "show_dot_items"
         const val KEY_EXCLUDED_FOLDERS = "excluded_folders"
         const val KEY_STORAGE_PATHS_INDEXED = "storage_paths_indexed_v1"
